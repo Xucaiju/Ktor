@@ -4,10 +4,7 @@ import com.example.exception.AuthenticationException
 import com.example.exception.AuthorizationException
 import com.example.model.User
 import com.example.service.impl.UserServiceImpl1
-import com.squareup.moshi.FromJson
-import com.squareup.moshi.JsonAdapter
-import com.squareup.moshi.Moshi
-import com.squareup.moshi.ToJson
+import com.squareup.moshi.*
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import io.ktor.routing.*
 import io.ktor.http.*
@@ -22,7 +19,10 @@ import io.ktor.http.content.*
 import io.ktor.response.*
 import io.ktor.sessions.*
 import io.ktor.websocket.*
+import kotlinx.coroutines.delay
+import retrofit2.converter.moshi.MoshiConverterFactory
 import java.io.IOException
+import java.lang.Exception
 import java.util.*
 import java.util.concurrent.atomic.AtomicInteger
 import javax.crypto.spec.ChaCha20ParameterSpec
@@ -104,7 +104,7 @@ fun Application.module(testing: Boolean = false) {
     }
     routing {
         val clients = Collections.synchronizedSet(LinkedHashSet<ChatClient>())
-        val moshi = Moshi.Builder().add(MsgSendToAdapter()).add(MsgTypeAdapter()).build()
+        val moshi = Moshi.Builder().add(MsgSendToAdapter()).add(MsgTypeAdapter()).add(KotlinJsonAdapterFactory()).build()
         val msgAdapter = moshi.adapter(Msg::class.java)
         webSocket("/chat-server") {
             val client = ChatClient(this)
@@ -112,6 +112,7 @@ fun Application.module(testing: Boolean = false) {
             println("客户端[${client.name}]已连接")
             val msg = Msg(client.id, Msg.MsgSendTo.SEND_TO_PRECISE_USER(client.id), Msg.MsgType.TYPE_LOGIN,"登录")
             val msgJsonStr = msgAdapter.toJson(msg)
+            println("登录消息:${msgJsonStr}")
             client.session.outgoing.send(Frame.Text(msgJsonStr))
             try {
                 while (true) {
@@ -126,7 +127,7 @@ fun Application.module(testing: Boolean = false) {
                             try {
                                 val msgFromUser = msgAdapter.fromJson(text)
                                 msgFromUser?.let {
-                                    MsgHandler.handleMsg(clients,it)
+                                    MsgHandler.handleMsg(clients, it.sendTo, text)
                                 }
                                 println("收到消息,转换成功!")
                             }catch (e:IOException){
@@ -137,17 +138,18 @@ fun Application.module(testing: Boolean = false) {
                             others.forEach {
                                 println(it.name)
                             }
-                            for (other in others.toList()) {
+                            /*for (other in others.toList()) {
                                 other.session.outgoing.send(Frame.Text(textToSend))
-                            }
+                            }*/
                         }
                         else -> {}
                     }
                 }
             } finally {
-                val msg = Msg(client.id, Msg.MsgSendTo.SEND_TO_PRECISE_USER(client.id), Msg.MsgType.TYPE_LOGOUT,"退出登录")
-                val msgJsonStr = msgAdapter.toJson(msg)
-                client.session.outgoing.send(Frame.Text(msgJsonStr))
+                println("客户端断开连接")
+                //val msg1 = Msg(client.id, Msg.MsgSendTo.SEND_TO_PRECISE_USER(client.id), Msg.MsgType.TYPE_LOGOUT,"退出登录")
+                //val msgJsonStr1 = msgAdapter.toJson(msg1)
+                //client.session.outgoing.send(Frame.Text(msgJsonStr1))
                 clients -= client
             }
         }
@@ -161,7 +163,7 @@ class ChatClient(val session: DefaultWebSocketSession) {
     val id = lastId.getAndIncrement()
     val name = "user$id"
 }
-
+//@JsonClass(generateAdapter = true)
 data class Msg(var userId:Int,var sendTo:MsgSendTo, var msgType:MsgType, var content:String){
     enum class MsgType{
         TYPE_LOGIN,
@@ -171,30 +173,32 @@ data class Msg(var userId:Int,var sendTo:MsgSendTo, var msgType:MsgType, var con
     sealed class MsgSendTo{
         data class SEND_TO_PRECISE_USER(var id:Int):MsgSendTo()//精确发送到人
         data class SEND_TO_PRECISE_GROUP(var id:Int):MsgSendTo()//精确发送到群
-        data class SEND_TO_FUZZY_GROUP(var ids:IntArray):MsgSendTo()//模糊发送到群
-        data class SEND_TO_FUZZY_USER(var ids:IntArray):MsgSendTo()//模糊发送到人
+        data class SEND_TO_FUZZY_GROUP(var ids:List<Int>): MsgSendTo()//模糊发送到群
+        data class SEND_TO_FUZZY_USER(var ids:List<Int>): MsgSendTo()//模糊发送到人
     }
+
     val id = lastId.getAndIncrement()
     companion object { var lastId = AtomicInteger(0) }
 }
 object MsgHandler{
-    private val moshi: Moshi = Moshi.Builder().add(MsgSendToAdapter()).add(MsgTypeAdapter()).build()
+    private val moshi: Moshi = Moshi.Builder().add(MsgSendToAdapter()).add(MsgTypeAdapter()).add(KotlinJsonAdapterFactory()).build()
     private val msgAdapter: JsonAdapter<Msg> = moshi.adapter(Msg::class.java)
-    suspend fun handleMsg(clients: MutableSet<ChatClient>, msg: Msg){
+    suspend fun handleMsg(clients: MutableSet<ChatClient>, sendTo: Msg.MsgSendTo, msgJsonText:String){
         println("处理消息中...")
-        when (msg.sendTo) {
+        when (sendTo) {
             is Msg.MsgSendTo.SEND_TO_PRECISE_USER -> {//发送给指定的人
-                val sendToUserId = (msg.sendTo as Msg.MsgSendTo.SEND_TO_PRECISE_USER).id
-                val msgJson = msgAdapter.toJson(msg)
+                val sendToUserId = (sendTo as Msg.MsgSendTo.SEND_TO_PRECISE_USER).id
+                println("发送给指定人(单人)==>$sendToUserId\t内容[${msgJsonText}]")
                 clients.find { it.id == sendToUserId }?.let {
-                    it.session.outgoing.send(Frame.Text(msgJson))
+                    it.session.outgoing.send(Frame.Text(msgJsonText))
                 }
             }
             is Msg.MsgSendTo.SEND_TO_PRECISE_GROUP -> {
 
             }
             is Msg.MsgSendTo.SEND_TO_FUZZY_USER -> {
-                val sendToUserIds = (msg.sendTo as Msg.MsgSendTo.SEND_TO_FUZZY_USER).ids
+                print("发送给指定人(多人)==>${(sendTo as Msg.MsgSendTo.SEND_TO_FUZZY_USER).ids}")
+               /* val sendToUserIds = (sendTo as Msg.MsgSendTo.SEND_TO_FUZZY_USER).ids
                 val msgJson = msgAdapter.toJson(msg)
                 val sendToClients = mutableSetOf<ChatClient>()
                 sendToUserIds.forEach { sendToId->
@@ -204,7 +208,7 @@ object MsgHandler{
                 }
                 sendToClients.forEach {
                     it.session.outgoing.send(Frame.Text(msgJson))
-                }
+                }*/
             }
             is Msg.MsgSendTo.SEND_TO_FUZZY_GROUP -> {
 
@@ -231,43 +235,63 @@ class MsgTypeAdapter{
         }
     }
 }
+
 data class PRECISE_USER(var id:Int)
-data class FUZZY_USER(var ids:IntArray)
+data class FUZZY_USER(var ids:List<Int>)
 data class PRECISE_GROUP(var id:Int)
-data class FUZZY_GROUP(var ids:IntArray)
+data class FUZZY_GROUP(var ids:List<Int>)
+
 class MsgSendToAdapter{
+    val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
+    val PRECISE_USER_Adapter = moshi.adapter(PRECISE_USER::class.java)
+    val PRECISE_GROUP_Adapter = moshi.adapter(PRECISE_GROUP::class.java)
+    val FUZZY_USER_Adapter = moshi.adapter(FUZZY_USER::class.java)
+    val FUZZY_GROUP_Adapter = moshi.adapter(FUZZY_GROUP::class.java)
     @FromJson
-    fun fromJson(value:Any):Msg.MsgSendTo?{
-        var msgSendTo:Msg.MsgSendTo? = null
-        if((value as? PRECISE_USER)!=null){
-            msgSendTo = Msg.MsgSendTo.SEND_TO_PRECISE_USER(value.id)
-        }
-        if((value as? FUZZY_USER)!=null){
-            msgSendTo = Msg.MsgSendTo.SEND_TO_FUZZY_USER(value.ids)
-        }
-        if((value as? PRECISE_GROUP)!=null){
-            msgSendTo = Msg.MsgSendTo.SEND_TO_PRECISE_GROUP(value.id)
-        }
-        if((value as? FUZZY_GROUP)!=null){
-            msgSendTo = Msg.MsgSendTo.SEND_TO_FUZZY_GROUP(value.ids)
+    fun fromJson(value:String?): Msg.MsgSendTo{
+        var msgSendTo: Msg.MsgSendTo = Msg.MsgSendTo.SEND_TO_PRECISE_USER(-1)
+        try {
+            val PRECISE_USER:PRECISE_USER? = PRECISE_USER_Adapter.fromJson(value)
+            /*val PRECISE_GROUP:PRECISE_GROUP? = PRECISE_GROUP_Adapter.fromJson(value)
+            val FUZZY_USER:FUZZY_USER? = FUZZY_USER_Adapter.fromJson(value)
+            val FUZZY_GROUP:FUZZY_GROUP? = FUZZY_GROUP_Adapter.fromJson(value)*/
+            when {
+                PRECISE_USER!=null -> {
+                    msgSendTo = Msg.MsgSendTo.SEND_TO_PRECISE_USER(PRECISE_USER.id)
+                }
+                /* PRECISE_GROUP!=null -> {
+                     msgSendTo = Msg.MsgSendTo.SEND_TO_PRECISE_GROUP(PRECISE_GROUP.id)
+                 }
+                 FUZZY_USER!=null -> {
+                     msgSendTo = Msg.MsgSendTo.SEND_TO_FUZZY_USER(FUZZY_USER.ids)
+                 }
+                 FUZZY_GROUP!=null -> {
+                     msgSendTo = Msg.MsgSendTo.SEND_TO_FUZZY_GROUP(FUZZY_GROUP.ids)
+                 }*/
+            }
+        }catch (e:Exception){
+            e.printStackTrace()
         }
         return msgSendTo
     }
     @ToJson
-    fun toJson(msgSendTo:Msg.MsgSendTo):Any?{
+    fun toJson(msgSendTo: Msg.MsgSendTo): String? {
         return when(msgSendTo){
-            is Msg.MsgSendTo.SEND_TO_PRECISE_USER->{
-                PRECISE_USER(msgSendTo.id)
+            is Msg.MsgSendTo.SEND_TO_PRECISE_USER ->{
+                PRECISE_USER_Adapter.toJson(PRECISE_USER(msgSendTo.id))
             }
-            is Msg.MsgSendTo.SEND_TO_PRECISE_GROUP->{
-                PRECISE_GROUP(msgSendTo.id)
+            else->{
+                PRECISE_USER_Adapter.toJson(PRECISE_USER(-1))
             }
-            is Msg.MsgSendTo.SEND_TO_FUZZY_USER->{
-                FUZZY_USER(msgSendTo.ids)
+            /*is Msg.MsgSendTo.SEND_TO_PRECISE_GROUP ->{
+                PRECISE_GROUP_Adapter.toJson(PRECISE_GROUP(msgSendTo.id))
             }
-            is Msg.MsgSendTo.SEND_TO_FUZZY_GROUP->{
-                FUZZY_GROUP(msgSendTo.ids)
+            is Msg.MsgSendTo.SEND_TO_FUZZY_USER ->{
+                FUZZY_USER_Adapter.toJson(FUZZY_USER(msgSendTo.ids))
             }
+            is Msg.MsgSendTo.SEND_TO_FUZZY_GROUP ->{
+                FUZZY_GROUP_Adapter.toJson(FUZZY_GROUP(msgSendTo.ids))
+            }*/
         }
     }
 }
